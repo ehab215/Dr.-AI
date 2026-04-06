@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { 
   Stethoscope, 
   Send, 
@@ -9,7 +9,12 @@ import {
   MessageSquare, 
   Activity, 
   Clock, 
-  User
+  User,
+  ClipboardList,
+  ChevronRight,
+  ChevronLeft,
+  CheckCircle2,
+  AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -18,6 +23,66 @@ interface Message {
   text: string;
   sender: 'user' | 'ai';
   timestamp: Date;
+}
+
+interface WizardStep {
+  id: number;
+  title: string;
+  question: string;
+  type: 'text' | 'select' | 'scale' | 'multi';
+  options?: string[];
+}
+
+const WIZARD_STEPS: WizardStep[] = [
+  {
+    id: 1,
+    title: "Primary Symptom",
+    question: "What is the main symptom you are experiencing today?",
+    type: 'text',
+  },
+  {
+    id: 2,
+    title: "Duration",
+    question: "How long have you been experiencing this symptom?",
+    type: 'select',
+    options: ["Less than 24 hours", "1-3 days", "About a week", "More than a week"],
+  },
+  {
+    id: 3,
+    title: "Severity",
+    question: "On a scale of 1 to 10, how severe is your discomfort?",
+    type: 'scale',
+  },
+  {
+    id: 4,
+    title: "Associated Symptoms",
+    question: "Are you experiencing any of the following? (Select all that apply)",
+    type: 'multi',
+    options: ["Fever", "Cough", "Pain", "Fatigue", "Nausea", "Shortness of breath"],
+  },
+  {
+    id: 5,
+    title: "Medical History",
+    question: "Do you have any pre-existing medical conditions or allergies?",
+    type: 'text',
+  }
+];
+
+// Custom hook for media queries
+function useMediaQuery(query: string) {
+  const [matches, setMatches] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    if (media.matches !== matches) {
+      setMatches(media.matches);
+    }
+    const listener = () => setMatches(media.matches);
+    media.addEventListener('change', listener);
+    return () => media.removeEventListener('change', listener);
+  }, [matches, query]);
+
+  return matches;
 }
 
 export default function App() {
@@ -32,7 +97,73 @@ export default function App() {
   const [inputValue, setInputValue] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isWizardOpen, setIsWizardOpen] = useState(false);
+  const [wizardStep, setWizardStep] = useState(0);
+  const [wizardAnswers, setWizardAnswers] = useState<Record<number, any>>({});
+  const [showScrollTop, setShowScrollTop] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  
+  const isMobile = useMediaQuery('(max-width: 768px)');
+
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowScrollTop(window.scrollY > 400);
+    };
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
+
+  const startWizard = () => {
+    setIsWizardOpen(true);
+    setWizardStep(0);
+    setWizardAnswers({});
+  };
+
+  const handleWizardNext = (answer: any) => {
+    const updatedAnswers = { ...wizardAnswers, [WIZARD_STEPS[wizardStep].id]: answer };
+    setWizardAnswers(updatedAnswers);
+
+    if (wizardStep < WIZARD_STEPS.length - 1) {
+      setWizardStep(prev => prev + 1);
+    } else {
+      // Finish wizard
+      setIsWizardOpen(false);
+      const summary = formatWizardSummary(updatedAnswers);
+      sendWizardSummary(summary);
+    }
+  };
+
+  const formatWizardSummary = (answers: Record<number, any>) => {
+    return `**Guided Symptom Report:**\n` +
+      `- Primary Symptom: ${answers[1]}\n` +
+      `- Duration: ${answers[2]}\n` +
+      `- Severity: ${answers[3]}/10\n` +
+      `- Associated: ${Array.isArray(answers[4]) ? answers[4].join(', ') : 'None'}\n` +
+      `- History: ${answers[5] || 'None reported'}`;
+  };
+
+  const sendWizardSummary = (summary: string) => {
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      text: summary,
+      sender: 'user',
+      timestamp: new Date(),
+    };
+
+    setMessages(prev => [...prev, userMessage]);
+    setIsThinking(true);
+
+    setTimeout(() => {
+      const aiMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        text: "Thank you for providing those details. Based on your report, I recommend monitoring your symptoms closely. If the severity increases or you experience difficulty breathing, please seek urgent medical care. This information has been logged for your consultation.",
+        sender: 'ai',
+        timestamp: new Date(),
+      };
+      setMessages(prev => [...prev, aiMessage]);
+      setIsThinking(false);
+    }, 2500);
+  };
 
   const scrollToBottom = () => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -113,10 +244,13 @@ export default function App() {
               className="md:hidden border-t border-slate-100 bg-white px-4 py-4"
             >
               <div className="flex flex-col gap-4">
-                <a href="#" className="text-base font-medium text-slate-600">Home</a>
-                <a href="#about" className="text-base font-medium text-slate-600">About</a>
-                <a href="#chat" className="text-base font-medium text-slate-600">Consult AI</a>
-                <button className="w-full rounded-lg bg-blue-600 py-3 text-center font-semibold text-white">
+                <a href="#" onClick={() => setIsMenuOpen(false)} className="text-base font-medium text-slate-600">Home</a>
+                <a href="#about" onClick={() => setIsMenuOpen(false)} className="text-base font-medium text-slate-600">About</a>
+                <a href="#chat" onClick={() => setIsMenuOpen(false)} className="text-base font-medium text-slate-600">Consult AI</a>
+                <button 
+                  onClick={() => setIsMenuOpen(false)}
+                  className="w-full rounded-lg bg-blue-600 py-3 text-center font-semibold text-white"
+                >
                   Get Started
                 </button>
               </div>
@@ -193,122 +327,266 @@ export default function App() {
         </section>
 
         {/* Chat Interface */}
-        <section id="chat" className="bg-slate-50 py-20">
-          <div className="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8">
+        <section id="chat" className="bg-slate-50 py-12 md:py-20">
+          <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
             <div className="mb-8 text-center">
-              <h2 className="text-3xl font-bold tracking-tight text-slate-900">Secure Consultation Window</h2>
-              <p className="mt-2 text-slate-600">Ask your medical questions below. Your data is encrypted and private.</p>
+              <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Secure Consultation Window</h2>
+              <p className="mt-2 text-sm md:text-base text-slate-600">Ask your medical questions below. Your data is encrypted and private.</p>
             </div>
 
-            <div className="flex flex-col h-[600px] rounded-3xl bg-white shadow-2xl shadow-slate-200 ring-1 ring-slate-200 overflow-hidden">
-              {/* Chat Header */}
-              <div className="flex items-center justify-between border-b border-slate-100 bg-white px-6 py-4">
-                <div className="flex items-center gap-3">
-                  <div className="relative">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-100 text-blue-600">
-                      <Stethoscope size={20} />
+            <div className="flex flex-col lg:flex-row gap-8 items-start">
+              <div className="flex flex-col h-[500px] md:h-[650px] flex-1 rounded-2xl md:rounded-3xl bg-white shadow-2xl shadow-slate-200 ring-1 ring-slate-200 overflow-hidden relative w-full">
+                {/* Chat Header */}
+                <div className="flex items-center justify-between border-b border-slate-100 bg-white px-4 md:px-6 py-3 md:py-4">
+                  <div className="flex items-center gap-3">
+                    <div className="relative">
+                      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-100 text-blue-600">
+                        <Stethoscope size={20} />
+                      </div>
+                      <div className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white bg-green-500"></div>
                     </div>
-                    <div className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white bg-green-500"></div>
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Dr. AI Assistant</p>
+                      <p className="text-xs text-slate-500">Online & Ready to Help</p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-sm font-bold text-slate-900">Dr. AI Assistant</p>
-                    <p className="text-xs text-slate-500">Online & Ready to Help</p>
+                  <div className="flex items-center gap-2">
+                    <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                      <Clock size={12} />
+                      Instant Response
+                    </span>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                    <Clock size={12} />
-                    Instant Response
-                  </span>
-                </div>
-              </div>
 
-              {/* Chat Messages */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-slate-50/30">
-                {messages.map((msg) => (
-                  <motion.div
-                    key={msg.id}
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div className={`flex max-w-[80%] gap-3 ${msg.sender === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
-                      <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white ${msg.sender === 'user' ? 'bg-blue-600' : 'bg-slate-700'}`}>
-                        {msg.sender === 'user' ? <User size={16} /> : <Stethoscope size={16} />}
-                      </div>
-                      <div className={`rounded-2xl px-4 py-3 text-sm shadow-sm ${
-                        msg.sender === 'user' 
-                          ? 'bg-blue-600 text-white rounded-tr-none' 
-                          : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'
-                      }`}>
-                        {msg.text}
-                        <p className={`mt-1 text-[10px] ${msg.sender === 'user' ? 'text-blue-100' : 'text-slate-400'}`}>
-                          {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </p>
-                      </div>
-                    </div>
-                  </motion.div>
-                ))}
-                
-                {isThinking && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="flex justify-start"
-                  >
-                    <div className="flex gap-3">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-700 text-white">
-                        <Stethoscope size={16} />
-                      </div>
-                      <div className="rounded-2xl bg-white border border-slate-100 px-4 py-3 shadow-sm rounded-tl-none">
-                        <div className="flex gap-1">
-                          <motion.div 
-                            animate={{ scale: [1, 1.2, 1] }} 
-                            transition={{ repeat: Infinity, duration: 1 }}
-                            className="h-2 w-2 rounded-full bg-blue-400" 
-                          />
-                          <motion.div 
-                            animate={{ scale: [1, 1.2, 1] }} 
-                            transition={{ repeat: Infinity, duration: 1, delay: 0.2 }}
-                            className="h-2 w-2 rounded-full bg-blue-400" 
-                          />
-                          <motion.div 
-                            animate={{ scale: [1, 1.2, 1] }} 
-                            transition={{ repeat: Infinity, duration: 1, delay: 0.4 }}
-                            className="h-2 w-2 rounded-full bg-blue-400" 
-                          />
+                {/* Chat Messages */}
+                <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 md:space-y-6 bg-slate-50/30 relative">
+                  <AnimatePresence>
+                    {isWizardOpen && (
+                      <motion.div
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 1 }}
+                        exit={{ opacity: 0 }}
+                        className={`absolute inset-0 z-20 flex items-center justify-center bg-white/95 backdrop-blur-sm ${isMobile ? 'p-0' : 'p-6'}`}
+                      >
+                        <div className={`w-full h-full md:h-auto md:max-w-md bg-white shadow-2xl ring-1 ring-slate-200 flex flex-col ${isMobile ? 'rounded-none' : 'rounded-3xl p-8'}`}>
+                          {isMobile && (
+                            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+                              <div className="flex items-center gap-2 text-blue-600">
+                                <ClipboardList size={20} />
+                                <span className="text-xs font-bold uppercase tracking-widest">Symptom Checker</span>
+                              </div>
+                              <button onClick={() => setIsWizardOpen(false)} className="text-slate-400 hover:text-slate-600">
+                                <X size={24} />
+                              </button>
+                            </div>
+                          )}
+                          
+                          <div className={`flex-1 overflow-y-auto ${isMobile ? 'p-6' : ''}`}>
+                            {!isMobile && (
+                              <div className="mb-6 flex items-center justify-between">
+                                <div className="flex items-center gap-2 text-blue-600">
+                                  <ClipboardList size={20} />
+                                  <span className="text-xs font-bold uppercase tracking-widest">Symptom Checker</span>
+                                </div>
+                                <button onClick={() => setIsWizardOpen(false)} className="text-slate-400 hover:text-slate-600">
+                                  <X size={20} />
+                                </button>
+                              </div>
+                            )}
+
+                            <div className="mb-8">
+                              <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase mb-2">
+                                <span>Step {wizardStep + 1} of {WIZARD_STEPS.length}</span>
+                                <span>{Math.round(((wizardStep + 1) / WIZARD_STEPS.length) * 100)}% Complete</span>
+                              </div>
+                              <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+                                <motion.div 
+                                  className="h-full bg-blue-600"
+                                  initial={{ width: 0 }}
+                                  animate={{ width: `${((wizardStep + 1) / WIZARD_STEPS.length) * 100}%` }}
+                                />
+                              </div>
+                            </div>
+
+                            <AnimatePresence mode="wait">
+                              <motion.div
+                                key={wizardStep}
+                                initial={{ opacity: 0, x: 20 }}
+                                animate={{ opacity: 1, x: 0 }}
+                                exit={{ opacity: 0, x: -20 }}
+                                className="space-y-6"
+                              >
+                                <h3 className="text-lg md:text-xl font-bold text-slate-900 leading-tight">{WIZARD_STEPS[wizardStep].question}</h3>
+                                
+                                {WIZARD_STEPS[wizardStep].type === 'text' && (
+                                  <WizardTextInput onNext={handleWizardNext} />
+                                )}
+                                {WIZARD_STEPS[wizardStep].type === 'select' && (
+                                  <WizardSelectInput options={WIZARD_STEPS[wizardStep].options!} onNext={handleWizardNext} />
+                                )}
+                                {WIZARD_STEPS[wizardStep].type === 'scale' && (
+                                  <WizardScaleInput onNext={handleWizardNext} />
+                                )}
+                                {WIZARD_STEPS[wizardStep].type === 'multi' && (
+                                  <WizardMultiInput options={WIZARD_STEPS[wizardStep].options!} onNext={handleWizardNext} />
+                                )}
+                              </motion.div>
+                            </AnimatePresence>
+
+                            {wizardStep > 0 && (
+                              <button 
+                                onClick={() => setWizardStep(prev => prev - 1)}
+                                className="mt-8 flex items-center gap-1 text-sm font-medium text-slate-400 hover:text-slate-600"
+                              >
+                                <ChevronLeft size={16} /> Back
+                              </button>
+                            )}
+                          </div>
                         </div>
-                        <p className="mt-1 text-[10px] text-slate-400 italic">Dr. AI is thinking...</p>
-                      </div>
-                    </div>
-                  </motion.div>
-                )}
-                <div ref={chatEndRef} />
-              </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
 
-              {/* Chat Input */}
-              <div className="border-t border-slate-100 bg-white p-4">
-                <form onSubmit={handleSendMessage} className="relative flex items-center">
-                  <input
-                    type="text"
-                    value={inputValue}
-                    onChange={(e) => setInputValue(e.target.value)}
-                    placeholder="Describe your symptoms or ask a medical question..."
-                    className="w-full rounded-2xl border-none bg-slate-100 py-4 pl-6 pr-14 text-sm focus:ring-2 focus:ring-blue-600 transition-all"
-                  />
-                  <button
-                    type="submit"
-                    disabled={!inputValue.trim() || isThinking}
-                    className="absolute right-2 flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200 hover:bg-blue-700 disabled:opacity-50 disabled:shadow-none transition-all active:scale-95"
-                  >
-                    <Send size={18} />
-                  </button>
-                </form>
-                <div className="mt-3 flex items-center justify-center gap-2 text-[10px] text-slate-400 uppercase tracking-widest">
-                  <ShieldCheck size={12} />
-                  End-to-End Encrypted
+                  {messages.map((msg) => (
+                    <motion.div
+                      key={msg.id}
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
+                      <div className={`flex max-w-[85%] md:max-w-[80%] gap-3 ${msg.sender === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
+                        <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white ${msg.sender === 'user' ? 'bg-blue-600' : 'bg-slate-700'}`}>
+                          {msg.sender === 'user' ? <User size={16} /> : <Stethoscope size={16} />}
+                        </div>
+                        <div className={`rounded-2xl px-4 py-3 text-sm shadow-sm ${
+                          msg.sender === 'user' 
+                            ? 'bg-blue-600 text-white rounded-tr-none' 
+                            : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'
+                        }`}>
+                          {msg.text}
+                          <p className={`mt-1 text-[10px] ${msg.sender === 'user' ? 'text-blue-100' : 'text-slate-400'}`}>
+                            {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </p>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+                  
+                  {isThinking && (
+                    <motion.div
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="flex justify-start"
+                    >
+                      <div className="flex gap-3">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-700 text-white">
+                          <Stethoscope size={16} />
+                        </div>
+                        <div className="rounded-2xl bg-white border border-slate-100 px-4 py-3 shadow-sm rounded-tl-none">
+                          <div className="flex gap-1">
+                            <motion.div 
+                              animate={{ scale: [1, 1.2, 1] }} 
+                              transition={{ repeat: Infinity, duration: 1 }}
+                              className="h-2 w-2 rounded-full bg-blue-400" 
+                            />
+                            <motion.div 
+                              animate={{ scale: [1, 1.2, 1] }} 
+                              transition={{ repeat: Infinity, duration: 1, delay: 0.2 }}
+                              className="h-2 w-2 rounded-full bg-blue-400" 
+                            />
+                            <motion.div 
+                              animate={{ scale: [1, 1.2, 1] }} 
+                              transition={{ repeat: Infinity, duration: 1, delay: 0.4 }}
+                              className="h-2 w-2 rounded-full bg-blue-400" 
+                            />
+                          </div>
+                          <p className="mt-1 text-[10px] text-slate-400 italic">Dr. AI is thinking...</p>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+
+                {/* Chat Input */}
+                <div className="border-t border-slate-100 bg-white p-4">
+                  {!isWizardOpen && messages.length === 1 && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      className="mb-4 flex justify-center"
+                    >
+                      <button 
+                        onClick={startWizard}
+                        className="flex items-center gap-2 rounded-full bg-blue-50 px-4 py-2 text-xs font-bold text-blue-600 ring-1 ring-blue-600/20 hover:bg-blue-100 transition-all"
+                      >
+                        <ClipboardList size={14} />
+                        Use Guided Symptom Checker
+                      </button>
+                    </motion.div>
+                  )}
+                  <form onSubmit={handleSendMessage} className="relative flex items-center">
+                    <input
+                      type="text"
+                      value={inputValue}
+                      onChange={(e) => setInputValue(e.target.value)}
+                      placeholder={isMobile ? "Ask Dr. AI..." : "Describe your symptoms or ask a medical question..."}
+                      className="w-full rounded-2xl border-none bg-slate-100 py-4 pl-6 pr-14 text-sm focus:ring-2 focus:ring-blue-600 transition-all"
+                    />
+                    <button
+                      type="submit"
+                      disabled={!inputValue.trim() || isThinking}
+                      className="absolute right-2 flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200 hover:bg-blue-700 disabled:opacity-50 disabled:shadow-none transition-all active:scale-95"
+                    >
+                      <Send size={18} />
+                    </button>
+                  </form>
+                  <div className="mt-3 flex items-center justify-center gap-2 text-[10px] text-slate-400 uppercase tracking-widest">
+                    <ShieldCheck size={12} />
+                    End-to-End Encrypted
+                  </div>
                 </div>
               </div>
+
+              {/* Desktop Sidebar */}
+              {!isMobile && (
+                <div className="hidden lg:flex flex-col w-72 gap-6">
+                  <div className="rounded-3xl bg-white p-6 shadow-xl ring-1 ring-slate-200">
+                    <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4 flex items-center gap-2">
+                      <Activity size={16} className="text-blue-600" />
+                      Health Insights
+                    </h3>
+                    <div className="space-y-4">
+                      <div className="p-3 rounded-xl bg-blue-50 border border-blue-100">
+                        <p className="text-xs font-bold text-blue-700 mb-1">Hydration Tip</p>
+                        <p className="text-[11px] text-blue-600 leading-relaxed">Drinking 8 glasses of water daily helps maintain cognitive function.</p>
+                      </div>
+                      <div className="p-3 rounded-xl bg-green-50 border border-green-100">
+                        <p className="text-xs font-bold text-green-700 mb-1">Sleep Quality</p>
+                        <p className="text-[11px] text-green-600 leading-relaxed">Consistent sleep schedules improve immune system response.</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-3xl bg-slate-900 p-6 shadow-xl text-white">
+                    <h3 className="text-xs font-bold uppercase tracking-widest mb-4 opacity-60">System Status</h3>
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] opacity-80">AI Model</span>
+                        <span className="text-[10px] font-bold text-green-400 uppercase">Active</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] opacity-80">Encryption</span>
+                        <span className="text-[10px] font-bold text-blue-400 uppercase">AES-256</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] opacity-80">Latency</span>
+                        <span className="text-[10px] font-bold text-slate-400">142ms</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </section>
@@ -379,6 +657,124 @@ export default function App() {
           </div>
         </div>
       </footer>
+
+      {/* Back to Top Button */}
+      <AnimatePresence>
+        {showScrollTop && (
+          <motion.button
+            initial={{ opacity: 0, scale: 0.5 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.5 }}
+            onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+            className="fixed bottom-6 right-6 z-50 flex h-12 w-12 items-center justify-center rounded-full bg-blue-600 text-white shadow-2xl hover:bg-blue-700 transition-all active:scale-95"
+          >
+            <ChevronRight size={24} className="-rotate-90" />
+          </motion.button>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function WizardTextInput({ onNext }: { onNext: (val: string) => void }) {
+  const [val, setVal] = useState('');
+  return (
+    <div className="space-y-4">
+      <textarea
+        autoFocus
+        className="w-full rounded-xl border-slate-200 bg-slate-50 p-4 text-sm focus:ring-2 focus:ring-blue-600 focus:border-transparent min-h-[100px]"
+        placeholder="Type your answer here..."
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+      />
+      <button
+        disabled={!val.trim()}
+        onClick={() => onNext(val)}
+        className="w-full flex items-center justify-center gap-2 rounded-xl bg-blue-600 py-3 font-bold text-white shadow-lg shadow-blue-200 hover:bg-blue-700 disabled:opacity-50 transition-all"
+      >
+        Continue <ChevronRight size={18} />
+      </button>
+    </div>
+  );
+}
+
+function WizardSelectInput({ options, onNext }: { options: string[], onNext: (val: string) => void }) {
+  return (
+    <div className="grid gap-3">
+      {options.map((opt) => (
+        <button
+          key={opt}
+          onClick={() => onNext(opt)}
+          className="w-full rounded-xl border border-slate-200 p-4 text-left text-sm font-medium text-slate-700 hover:border-blue-600 hover:bg-blue-50 hover:text-blue-600 transition-all"
+        >
+          {opt}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function WizardScaleInput({ onNext }: { onNext: (val: number) => void }) {
+  const [val, setVal] = useState(5);
+  return (
+    <div className="space-y-8 py-4">
+      <div className="relative pt-1">
+        <input
+          type="range"
+          min="1"
+          max="10"
+          value={val}
+          onChange={(e) => setVal(parseInt(e.target.value))}
+          className="w-full h-2 bg-slate-100 rounded-lg appearance-none cursor-pointer accent-blue-600"
+        />
+        <div className="flex justify-between text-[10px] font-bold text-slate-400 mt-2">
+          <span>1 - MILD</span>
+          <span>10 - SEVERE</span>
+        </div>
+      </div>
+      <div className="text-center">
+        <span className="text-5xl font-black text-blue-600">{val}</span>
+      </div>
+      <button
+        onClick={() => onNext(val)}
+        className="w-full flex items-center justify-center gap-2 rounded-xl bg-blue-600 py-3 font-bold text-white shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all"
+      >
+        Continue <ChevronRight size={18} />
+      </button>
+    </div>
+  );
+}
+
+function WizardMultiInput({ options, onNext }: { options: string[], onNext: (val: string[]) => void }) {
+  const [selected, setSelected] = useState<string[]>([]);
+  
+  const toggle = (opt: string) => {
+    setSelected(prev => prev.includes(opt) ? prev.filter(o => o !== opt) : [...prev, opt]);
+  };
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 gap-3">
+        {options.map((opt) => (
+          <button
+            key={opt}
+            onClick={() => toggle(opt)}
+            className={`rounded-xl border p-4 text-center text-xs font-bold transition-all ${
+              selected.includes(opt) 
+                ? 'border-blue-600 bg-blue-50 text-blue-600' 
+                : 'border-slate-200 text-slate-600 hover:border-slate-300'
+            }`}
+          >
+            {opt}
+          </button>
+        ))}
+      </div>
+      <button
+        onClick={() => onNext(selected)}
+        className="w-full flex items-center justify-center gap-2 rounded-xl bg-blue-600 py-3 font-bold text-white shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all"
+      >
+        {selected.length > 0 ? `Continue with ${selected.length} selected` : 'None of these'} <ChevronRight size={18} />
+      </button>
     </div>
   );
 }
