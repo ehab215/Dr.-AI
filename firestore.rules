@@ -1,0 +1,80 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    // Collection: users
+    // Fields: uid, email, displayName, subscriptionTier, createdAt
+    //
+    // Collection: chat_sessions
+    // Fields: uid, title, lastMessage, updatedAt, createdAt
+    //
+    // Subcollection: messages
+    // Fields: sessionId, text, sender, timestamp
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDocOwner() {
+      return isAuthenticated() && request.auth.uid == resource.data.uid;
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.subscriptionTier == 'admin' ||
+         (request.auth.token.email == "ehab.fayez215@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    // Domain Validators
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'subscriptionTier']) &&
+             data.uid == request.auth.uid &&
+             isValidEmail(data.email) &&
+             data.subscriptionTier in ['free', 'pro', 'enterprise'];
+    }
+
+    function isValidChatSession(data) {
+      return data.keys().hasAll(['uid', 'title', 'updatedAt']) &&
+             data.uid == request.auth.uid &&
+             data.title is string && data.title.size() < 100;
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['text', 'sender', 'timestamp']) &&
+             data.text is string && data.text.size() < 5000 &&
+             data.sender in ['user', 'ai'];
+    }
+
+    // Rules
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+      allow create: if isOwner(uid) && isValidUser(request.resource.data);
+      allow update: if isOwner(uid) && isValidUser(request.resource.data) && 
+                      request.resource.data.subscriptionTier == resource.data.subscriptionTier; // Cannot self-upgrade
+    }
+
+    match /chat_sessions/{sessionId} {
+      allow read: if isDocOwner() || isAdmin();
+      allow create: if isAuthenticated() && isValidChatSession(request.resource.data);
+      allow update: if isDocOwner() && isValidChatSession(request.resource.data);
+      allow delete: if isDocOwner();
+
+      match /messages/{messageId} {
+        allow read: if get(/databases/$(database)/documents/chat_sessions/$(sessionId)).data.uid == request.auth.uid || isAdmin();
+        allow create: if get(/databases/$(database)/documents/chat_sessions/$(sessionId)).data.uid == request.auth.uid && isValidMessage(request.resource.data);
+      }
+    }
+  }
+}

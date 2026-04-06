@@ -14,15 +14,53 @@ import {
   ChevronRight,
   ChevronLeft,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  LogOut,
+  LogIn,
+  CreditCard,
+  History,
+  Plus,
+  Trash2,
+  Lock,
+  Star
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { auth, db } from './firebase';
+import { 
+  onAuthStateChanged, 
+  signInWithPopup, 
+  GoogleAuthProvider, 
+  signOut,
+  User as FirebaseUser
+} from 'firebase/auth';
+import { 
+  collection, 
+  query, 
+  where, 
+  orderBy, 
+  onSnapshot, 
+  addDoc, 
+  serverTimestamp, 
+  doc, 
+  updateDoc, 
+  deleteDoc,
+  getDoc,
+  setDoc
+} from 'firebase/firestore';
+import { GoogleGenAI } from "@google/genai";
 
 interface Message {
   id: string;
   text: string;
   sender: 'user' | 'ai';
-  timestamp: Date;
+  timestamp: any;
+}
+
+interface ChatSession {
+  id: string;
+  title: string;
+  updatedAt: any;
+  uid: string;
 }
 
 interface WizardStep {
@@ -86,14 +124,12 @@ function useMediaQuery(query: string) {
 }
 
 export default function App() {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: '1',
-      text: "Hello! I'm Dr. AI. How can I assist you with your medical queries today? Please remember that I am an AI and not a replacement for professional medical advice.",
-      sender: 'ai',
-      timestamp: new Date(),
-    }
-  ]);
+  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'chat' | 'history' | 'billing'>('chat');
   const [inputValue, setInputValue] = useState('');
   const [isThinking, setIsThinking] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -104,6 +140,99 @@ export default function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   
   const isMobile = useMediaQuery('(max-width: 768px)');
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setUser(user);
+      setIsAuthLoading(false);
+      if (user) {
+        // Ensure user profile exists
+        const userRef = doc(db, 'users', user.uid);
+        const userSnap = await getDoc(userRef);
+        if (!userSnap.exists()) {
+          await setDoc(userRef, {
+            uid: user.uid,
+            email: user.email,
+            displayName: user.displayName,
+            subscriptionTier: 'free',
+            createdAt: new Date().toISOString()
+          });
+        }
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) {
+      setChatSessions([]);
+      return;
+    }
+    const q = query(
+      collection(db, 'chat_sessions'),
+      where('uid', '==', user.uid),
+      orderBy('updatedAt', 'desc')
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const sessions = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatSession));
+      setChatSessions(sessions);
+    });
+    return () => unsubscribe();
+  }, [user]);
+
+  useEffect(() => {
+    if (!currentSessionId) {
+      setMessages([]);
+      return;
+    }
+    const q = query(
+      collection(db, 'chat_sessions', currentSessionId, 'messages'),
+      orderBy('timestamp', 'asc')
+    );
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Message));
+      setMessages(msgs);
+    });
+    return () => unsubscribe();
+  }, [currentSessionId]);
+
+  const handleSignIn = async () => {
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } catch (error) {
+      console.error("Sign in error:", error);
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      setCurrentSessionId(null);
+    } catch (error) {
+      console.error("Sign out error:", error);
+    }
+  };
+
+  const createNewChat = async () => {
+    if (!user) return;
+    const docRef = await addDoc(collection(db, 'chat_sessions'), {
+      uid: user.uid,
+      title: 'New Consultation',
+      updatedAt: serverTimestamp(),
+      createdAt: serverTimestamp()
+    });
+    setCurrentSessionId(docRef.id);
+    setActiveTab('chat');
+  };
+
+  const deleteSession = async (sessionId: string) => {
+    if (!user) return;
+    await deleteDoc(doc(db, 'chat_sessions', sessionId));
+    if (currentSessionId === sessionId) {
+      setCurrentSessionId(null);
+    }
+  };
 
   useEffect(() => {
     const handleScroll = () => {
@@ -142,25 +271,41 @@ export default function App() {
       `- History: ${answers[5] || 'None reported'}`;
   };
 
-  const sendWizardSummary = (summary: string) => {
-    const userMessage: Message = {
-      id: Date.now().toString(),
+  const sendWizardSummary = async (summary: string) => {
+    if (!user) return;
+    let sessionId = currentSessionId;
+    if (!sessionId) {
+      const docRef = await addDoc(collection(db, 'chat_sessions'), {
+        uid: user.uid,
+        title: summary.slice(0, 30) + '...',
+        updatedAt: serverTimestamp(),
+        createdAt: serverTimestamp()
+      });
+      sessionId = docRef.id;
+      setCurrentSessionId(sessionId);
+    }
+
+    const messagesRef = collection(db, 'chat_sessions', sessionId, 'messages');
+    await addDoc(messagesRef, {
       text: summary,
       sender: 'user',
-      timestamp: new Date(),
-    };
+      timestamp: serverTimestamp()
+    });
 
-    setMessages(prev => [...prev, userMessage]);
+    await updateDoc(doc(db, 'chat_sessions', sessionId), {
+      updatedAt: serverTimestamp(),
+      lastMessage: summary
+    });
+
     setIsThinking(true);
 
-    setTimeout(() => {
-      const aiMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        text: "Thank you for providing those details. Based on your report, I recommend monitoring your symptoms closely. If the severity increases or you experience difficulty breathing, please seek urgent medical care. This information has been logged for your consultation.",
+    setTimeout(async () => {
+      const aiText = "Thank you for providing those details. Based on your report, I recommend monitoring your symptoms closely. If the severity increases or you experience difficulty breathing, please seek urgent medical care. This information has been logged for your consultation.";
+      await addDoc(messagesRef, {
+        text: aiText,
         sender: 'ai',
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, aiMessage]);
+        timestamp: serverTimestamp()
+      });
       setIsThinking(false);
     }, 2500);
   };
@@ -173,33 +318,62 @@ export default function App() {
     scrollToBottom();
   }, [messages, isThinking]);
 
-  const handleSendMessage = (e: React.FormEvent) => {
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputValue.trim()) return;
+    if (!inputValue.trim() || !user) return;
 
-    const userMessage: Message = {
-      id: Date.now().toString(),
-      text: inputValue,
-      sender: 'user',
-      timestamp: new Date(),
-    };
+    let sessionId = currentSessionId;
+    if (!sessionId) {
+      const docRef = await addDoc(collection(db, 'chat_sessions'), {
+        uid: user.uid,
+        title: inputValue.slice(0, 30) + '...',
+        updatedAt: serverTimestamp(),
+        createdAt: serverTimestamp()
+      });
+      sessionId = docRef.id;
+      setCurrentSessionId(sessionId);
+    }
 
-    setMessages(prev => [...prev, userMessage]);
+    const messagesRef = collection(db, 'chat_sessions', sessionId, 'messages');
+    const text = inputValue;
     setInputValue('');
+    
+    await addDoc(messagesRef, {
+      text,
+      sender: 'user',
+      timestamp: serverTimestamp()
+    });
+
+    await updateDoc(doc(db, 'chat_sessions', sessionId), {
+      updatedAt: serverTimestamp(),
+      lastMessage: text
+    });
+
     setIsThinking(true);
 
     // Simulate AI response
-    setTimeout(() => {
-      const aiMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        text: "I am processing your query. Based on general medical knowledge, it's important to monitor symptoms closely. However, for a specific diagnosis, please consult a licensed healthcare professional immediately.",
+    setTimeout(async () => {
+      const aiText = "I am processing your query. Based on general medical knowledge, it's important to monitor symptoms closely. However, for a specific diagnosis, please consult a licensed healthcare professional immediately.";
+      await addDoc(messagesRef, {
+        text: aiText,
         sender: 'ai',
-        timestamp: new Date(),
-      };
-      setMessages(prev => [...prev, aiMessage]);
+        timestamp: serverTimestamp()
+      });
       setIsThinking(false);
     }, 2000);
   };
+
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <motion.div 
+          animate={{ rotate: 360 }}
+          transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
+          className="h-12 w-12 border-4 border-blue-600 border-t-transparent rounded-full"
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900 selection:bg-blue-100">
@@ -217,12 +391,40 @@ export default function App() {
 
           {/* Desktop Nav */}
           <div className="hidden md:flex md:items-center md:gap-8">
-            <a href="#" className="text-sm font-medium text-slate-600 hover:text-blue-600 transition-colors">Home</a>
+            <button onClick={() => setActiveTab('chat')} className={`text-sm font-medium transition-colors ${activeTab === 'chat' ? 'text-blue-600' : 'text-slate-600 hover:text-blue-600'}`}>Consult AI</button>
+            {user && (
+              <>
+                <button onClick={() => setActiveTab('history')} className={`text-sm font-medium transition-colors ${activeTab === 'history' ? 'text-blue-600' : 'text-slate-600 hover:text-blue-600'}`}>History</button>
+                <button onClick={() => setActiveTab('billing')} className={`text-sm font-medium transition-colors ${activeTab === 'billing' ? 'text-blue-600' : 'text-slate-600 hover:text-blue-600'}`}>Subscription</button>
+              </>
+            )}
             <a href="#about" className="text-sm font-medium text-slate-600 hover:text-blue-600 transition-colors">About</a>
-            <a href="#chat" className="text-sm font-medium text-slate-600 hover:text-blue-600 transition-colors">Consult AI</a>
-            <button className="rounded-full bg-blue-600 px-5 py-2 text-sm font-semibold text-white shadow-md hover:bg-blue-700 transition-all active:scale-95">
-              Get Started
-            </button>
+            
+            {user ? (
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-100 border border-slate-200">
+                  <div className="h-6 w-6 rounded-full bg-blue-600 flex items-center justify-center text-[10px] text-white font-bold">
+                    {user.displayName?.[0] || 'U'}
+                  </div>
+                  <span className="text-xs font-semibold text-slate-700">{user.displayName?.split(' ')[0]}</span>
+                </div>
+                <button 
+                  onClick={handleSignOut}
+                  className="text-slate-500 hover:text-red-600 transition-colors"
+                  title="Sign Out"
+                >
+                  <LogOut size={18} />
+                </button>
+              </div>
+            ) : (
+              <button 
+                onClick={handleSignIn}
+                className="rounded-full bg-blue-600 px-5 py-2 text-sm font-semibold text-white shadow-md hover:bg-blue-700 transition-all active:scale-95 flex items-center gap-2"
+              >
+                <LogIn size={16} />
+                Sign In
+              </button>
+            )}
           </div>
 
           {/* Mobile Menu Toggle */}
@@ -244,15 +446,39 @@ export default function App() {
               className="md:hidden border-t border-slate-100 bg-white px-4 py-4"
             >
               <div className="flex flex-col gap-4">
-                <a href="#" onClick={() => setIsMenuOpen(false)} className="text-base font-medium text-slate-600">Home</a>
+                <button onClick={() => { setActiveTab('chat'); setIsMenuOpen(false); }} className="text-left text-base font-medium text-slate-600">Consult AI</button>
+                {user && (
+                  <>
+                    <button onClick={() => { setActiveTab('history'); setIsMenuOpen(false); }} className="text-left text-base font-medium text-slate-600">My History</button>
+                    <button onClick={() => { setActiveTab('billing'); setIsMenuOpen(false); }} className="text-left text-base font-medium text-slate-600">Subscription</button>
+                  </>
+                )}
                 <a href="#about" onClick={() => setIsMenuOpen(false)} className="text-base font-medium text-slate-600">About</a>
-                <a href="#chat" onClick={() => setIsMenuOpen(false)} className="text-base font-medium text-slate-600">Consult AI</a>
-                <button 
-                  onClick={() => setIsMenuOpen(false)}
-                  className="w-full rounded-lg bg-blue-600 py-3 text-center font-semibold text-white"
-                >
-                  Get Started
-                </button>
+                
+                {user ? (
+                  <div className="flex items-center justify-between pt-4 border-t border-slate-100">
+                    <div className="flex items-center gap-3">
+                      <div className="h-10 w-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold">
+                        {user.displayName?.[0] || 'U'}
+                      </div>
+                      <div>
+                        <p className="text-sm font-bold text-slate-900">{user.displayName}</p>
+                        <p className="text-xs text-slate-500">{user.email}</p>
+                      </div>
+                    </div>
+                    <button onClick={handleSignOut} className="p-2 text-slate-400 hover:text-red-600">
+                      <LogOut size={20} />
+                    </button>
+                  </div>
+                ) : (
+                  <button 
+                    onClick={() => { handleSignIn(); setIsMenuOpen(false); }}
+                    className="w-full rounded-lg bg-blue-600 py-3 text-center font-semibold text-white flex items-center justify-center gap-2"
+                  >
+                    <LogIn size={18} />
+                    Sign In with Google
+                  </button>
+                )}
               </div>
             </motion.div>
           )}
@@ -326,268 +552,513 @@ export default function App() {
           </div>
         </section>
 
-        {/* Chat Interface */}
+        {/* Main Content Sections */}
         <section id="chat" className="bg-slate-50 py-12 md:py-20">
-          <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
-            <div className="mb-8 text-center">
-              <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Secure Consultation Window</h2>
-              <p className="mt-2 text-sm md:text-base text-slate-600">Ask your medical questions below. Your data is encrypted and private.</p>
-            </div>
-
-            <div className="flex flex-col lg:flex-row gap-8 items-start">
-              <div className="flex flex-col h-[500px] md:h-[650px] flex-1 rounded-2xl md:rounded-3xl bg-white shadow-2xl shadow-slate-200 ring-1 ring-slate-200 overflow-hidden relative w-full">
-                {/* Chat Header */}
-                <div className="flex items-center justify-between border-b border-slate-100 bg-white px-4 md:px-6 py-3 md:py-4">
-                  <div className="flex items-center gap-3">
-                    <div className="relative">
-                      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-100 text-blue-600">
-                        <Stethoscope size={20} />
-                      </div>
-                      <div className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white bg-green-500"></div>
-                    </div>
-                    <div>
-                      <p className="text-sm font-bold text-slate-900">Dr. AI Assistant</p>
-                      <p className="text-xs text-slate-500">Online & Ready to Help</p>
-                    </div>
+          <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+            <AnimatePresence mode="wait">
+              {activeTab === 'chat' && (
+                <motion.div
+                  key="chat"
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                >
+                  <div className="mb-8 text-center">
+                    <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Secure Consultation Window</h2>
+                    <p className="mt-2 text-sm md:text-base text-slate-600">Ask your medical questions below. Your data is encrypted and private.</p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
-                      <Clock size={12} />
-                      Instant Response
-                    </span>
-                  </div>
-                </div>
 
-                {/* Chat Messages */}
-                <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 md:space-y-6 bg-slate-50/30 relative">
-                  <AnimatePresence>
-                    {isWizardOpen && (
-                      <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        exit={{ opacity: 0 }}
-                        className={`absolute inset-0 z-20 flex items-center justify-center bg-white/95 backdrop-blur-sm ${isMobile ? 'p-0' : 'p-6'}`}
-                      >
-                        <div className={`w-full h-full md:h-auto md:max-w-md bg-white shadow-2xl ring-1 ring-slate-200 flex flex-col ${isMobile ? 'rounded-none' : 'rounded-3xl p-8'}`}>
-                          {isMobile && (
-                            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
-                              <div className="flex items-center gap-2 text-blue-600">
-                                <ClipboardList size={20} />
-                                <span className="text-xs font-bold uppercase tracking-widest">Symptom Checker</span>
-                              </div>
-                              <button onClick={() => setIsWizardOpen(false)} className="text-slate-400 hover:text-slate-600">
-                                <X size={24} />
-                              </button>
+                  <div className="flex flex-col lg:flex-row gap-8 items-start max-w-5xl mx-auto">
+                    <div className="flex flex-col h-[500px] md:h-[650px] flex-1 rounded-2xl md:rounded-3xl bg-white shadow-2xl shadow-slate-200 ring-1 ring-slate-200 overflow-hidden relative w-full">
+                      
+                      {/* Auth Guard Overlay */}
+                      {!user && !isAuthLoading && (
+                        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-white/80 backdrop-blur-md p-8 text-center">
+                          <div className="h-16 w-16 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center mb-6">
+                            <Lock size={32} />
+                          </div>
+                          <h3 className="text-xl font-bold text-slate-900 mb-2">Sign In Required</h3>
+                          <p className="text-slate-600 mb-8 max-w-xs">Please sign in to start a secure consultation and save your chat history.</p>
+                          <button 
+                            onClick={handleSignIn}
+                            className="rounded-full bg-blue-600 px-8 py-4 text-lg font-semibold text-white shadow-xl shadow-blue-200 hover:bg-blue-700 transition-all flex items-center gap-2"
+                          >
+                            <LogIn size={20} />
+                            Sign In with Google
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Chat Header */}
+                      <div className="flex items-center justify-between border-b border-slate-100 bg-white px-4 md:px-6 py-3 md:py-4">
+                        <div className="flex items-center gap-3">
+                          <div className="relative">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-100 text-blue-600">
+                              <Stethoscope size={20} />
                             </div>
+                            <div className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white bg-green-500"></div>
+                          </div>
+                          <div>
+                            <p className="text-sm font-bold text-slate-900">Dr. AI Assistant</p>
+                            <p className="text-xs text-slate-500">Online & Ready to Help</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {user && (
+                            <button 
+                              onClick={createNewChat}
+                              className="p-2 text-slate-400 hover:text-blue-600 transition-colors"
+                              title="New Chat"
+                            >
+                              <Plus size={20} />
+                            </button>
                           )}
-                          
-                          <div className={`flex-1 overflow-y-auto ${isMobile ? 'p-6' : ''}`}>
-                            {!isMobile && (
-                              <div className="mb-6 flex items-center justify-between">
-                                <div className="flex items-center gap-2 text-blue-600">
-                                  <ClipboardList size={20} />
-                                  <span className="text-xs font-bold uppercase tracking-widest">Symptom Checker</span>
-                                </div>
-                                <button onClick={() => setIsWizardOpen(false)} className="text-slate-400 hover:text-slate-600">
-                                  <X size={20} />
-                                </button>
-                              </div>
-                            )}
+                          <span className="hidden sm:inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                            <Clock size={12} />
+                            Instant Response
+                          </span>
+                        </div>
+                      </div>
 
-                            <div className="mb-8">
-                              <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase mb-2">
-                                <span>Step {wizardStep + 1} of {WIZARD_STEPS.length}</span>
-                                <span>{Math.round(((wizardStep + 1) / WIZARD_STEPS.length) * 100)}% Complete</span>
+                      {/* Chat Messages */}
+                      <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-4 md:space-y-6 bg-slate-50/30 relative">
+                        {messages.length === 0 && !isThinking && (
+                          <div className="flex flex-col items-center justify-center h-full text-center p-8">
+                            <div className="h-12 w-12 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center mb-4">
+                              <MessageSquare size={24} />
+                            </div>
+                            <h4 className="text-slate-900 font-bold mb-1">Start a New Consultation</h4>
+                            <p className="text-slate-500 text-sm max-w-xs">Ask anything about your health or use the guided symptom checker.</p>
+                          </div>
+                        )}
+                        
+                        <AnimatePresence>
+                          {isWizardOpen && (
+                            <motion.div
+                              initial={{ opacity: 0 }}
+                              animate={{ opacity: 1 }}
+                              exit={{ opacity: 0 }}
+                              className={`absolute inset-0 z-20 flex items-center justify-center bg-white/95 backdrop-blur-sm ${isMobile ? 'p-0' : 'p-6'}`}
+                            >
+                              <div className={`w-full h-full md:h-auto md:max-w-md bg-white shadow-2xl ring-1 ring-slate-200 flex flex-col ${isMobile ? 'rounded-none' : 'rounded-3xl p-8'}`}>
+                                {isMobile && (
+                                  <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100">
+                                    <div className="flex items-center gap-2 text-blue-600">
+                                      <ClipboardList size={20} />
+                                      <span className="text-xs font-bold uppercase tracking-widest">Symptom Checker</span>
+                                    </div>
+                                    <button onClick={() => setIsWizardOpen(false)} className="text-slate-400 hover:text-slate-600">
+                                      <X size={24} />
+                                    </button>
+                                  </div>
+                                )}
+                                
+                                <div className={`flex-1 overflow-y-auto ${isMobile ? 'p-6' : ''}`}>
+                                  {!isMobile && (
+                                    <div className="mb-6 flex items-center justify-between">
+                                      <div className="flex items-center gap-2 text-blue-600">
+                                        <ClipboardList size={20} />
+                                        <span className="text-xs font-bold uppercase tracking-widest">Symptom Checker</span>
+                                      </div>
+                                      <button onClick={() => setIsWizardOpen(false)} className="text-slate-400 hover:text-slate-600">
+                                        <X size={20} />
+                                      </button>
+                                    </div>
+                                  )}
+
+                                  <div className="mb-8">
+                                    <div className="flex justify-between text-[10px] font-bold text-slate-400 uppercase mb-2">
+                                      <span>Step {wizardStep + 1} of {WIZARD_STEPS.length}</span>
+                                      <span>{Math.round(((wizardStep + 1) / WIZARD_STEPS.length) * 100)}% Complete</span>
+                                    </div>
+                                    <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
+                                      <motion.div 
+                                        className="h-full bg-blue-600"
+                                        initial={{ width: 0 }}
+                                        animate={{ width: `${((wizardStep + 1) / WIZARD_STEPS.length) * 100}%` }}
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <AnimatePresence mode="wait">
+                                    <motion.div
+                                      key={wizardStep}
+                                      initial={{ opacity: 0, x: 20 }}
+                                      animate={{ opacity: 1, x: 0 }}
+                                      exit={{ opacity: 0, x: -20 }}
+                                      className="space-y-6"
+                                    >
+                                      <h3 className="text-lg md:text-xl font-bold text-slate-900 leading-tight">{WIZARD_STEPS[wizardStep].question}</h3>
+                                      
+                                      {WIZARD_STEPS[wizardStep].type === 'text' && (
+                                        <WizardTextInput onNext={handleWizardNext} />
+                                      )}
+                                      {WIZARD_STEPS[wizardStep].type === 'select' && (
+                                        <WizardSelectInput options={WIZARD_STEPS[wizardStep].options!} onNext={handleWizardNext} />
+                                      )}
+                                      {WIZARD_STEPS[wizardStep].type === 'scale' && (
+                                        <WizardScaleInput onNext={handleWizardNext} />
+                                      )}
+                                      {WIZARD_STEPS[wizardStep].type === 'multi' && (
+                                        <WizardMultiInput options={WIZARD_STEPS[wizardStep].options!} onNext={handleWizardNext} />
+                                      )}
+                                    </motion.div>
+                                  </AnimatePresence>
+
+                                  {wizardStep > 0 && (
+                                    <button 
+                                      onClick={() => setWizardStep(prev => prev - 1)}
+                                      className="mt-8 flex items-center gap-1 text-sm font-medium text-slate-400 hover:text-slate-600"
+                                    >
+                                      <ChevronLeft size={16} /> Back
+                                    </button>
+                                  )}
+                                </div>
                               </div>
-                              <div className="h-1.5 w-full rounded-full bg-slate-100 overflow-hidden">
-                                <motion.div 
-                                  className="h-full bg-blue-600"
-                                  initial={{ width: 0 }}
-                                  animate={{ width: `${((wizardStep + 1) / WIZARD_STEPS.length) * 100}%` }}
-                                />
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+
+                        {messages.map((msg) => (
+                          <motion.div
+                            key={msg.id}
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+                          >
+                            <div className={`flex max-w-[85%] md:max-w-[80%] gap-3 ${msg.sender === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
+                              <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white ${msg.sender === 'user' ? 'bg-blue-600' : 'bg-slate-700'}`}>
+                                {msg.sender === 'user' ? <User size={16} /> : <Stethoscope size={16} />}
+                              </div>
+                              <div className={`rounded-2xl px-4 py-3 text-sm shadow-sm ${
+                                msg.sender === 'user' 
+                                  ? 'bg-blue-600 text-white rounded-tr-none' 
+                                  : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'
+                              }`}>
+                                {msg.text}
+                                <p className={`mt-1 text-[10px] ${msg.sender === 'user' ? 'text-blue-100' : 'text-slate-400'}`}>
+                                  {msg.timestamp?.toDate ? msg.timestamp.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now'}
+                                </p>
                               </div>
                             </div>
+                          </motion.div>
+                        ))}
+                        
+                        {isThinking && (
+                          <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            className="flex justify-start"
+                          >
+                            <div className="flex gap-3">
+                              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-700 text-white">
+                                <Stethoscope size={16} />
+                              </div>
+                              <div className="rounded-2xl bg-white border border-slate-100 px-4 py-3 shadow-sm rounded-tl-none">
+                                <div className="flex gap-1">
+                                  <motion.div 
+                                    animate={{ scale: [1, 1.2, 1] }} 
+                                    transition={{ repeat: Infinity, duration: 1 }}
+                                    className="h-2 w-2 rounded-full bg-blue-400" 
+                                  />
+                                  <motion.div 
+                                    animate={{ scale: [1, 1.2, 1] }} 
+                                    transition={{ repeat: Infinity, duration: 1, delay: 0.2 }}
+                                    className="h-2 w-2 rounded-full bg-blue-400" 
+                                  />
+                                  <motion.div 
+                                    animate={{ scale: [1, 1.2, 1] }} 
+                                    transition={{ repeat: Infinity, duration: 1, delay: 0.4 }}
+                                    className="h-2 w-2 rounded-full bg-blue-400" 
+                                  />
+                                </div>
+                                <p className="mt-1 text-[10px] text-slate-400 italic">Dr. AI is thinking...</p>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                        <div ref={chatEndRef} />
+                      </div>
 
-                            <AnimatePresence mode="wait">
-                              <motion.div
-                                key={wizardStep}
-                                initial={{ opacity: 0, x: 20 }}
-                                animate={{ opacity: 1, x: 0 }}
-                                exit={{ opacity: 0, x: -20 }}
-                                className="space-y-6"
-                              >
-                                <h3 className="text-lg md:text-xl font-bold text-slate-900 leading-tight">{WIZARD_STEPS[wizardStep].question}</h3>
-                                
-                                {WIZARD_STEPS[wizardStep].type === 'text' && (
-                                  <WizardTextInput onNext={handleWizardNext} />
-                                )}
-                                {WIZARD_STEPS[wizardStep].type === 'select' && (
-                                  <WizardSelectInput options={WIZARD_STEPS[wizardStep].options!} onNext={handleWizardNext} />
-                                )}
-                                {WIZARD_STEPS[wizardStep].type === 'scale' && (
-                                  <WizardScaleInput onNext={handleWizardNext} />
-                                )}
-                                {WIZARD_STEPS[wizardStep].type === 'multi' && (
-                                  <WizardMultiInput options={WIZARD_STEPS[wizardStep].options!} onNext={handleWizardNext} />
-                                )}
-                              </motion.div>
-                            </AnimatePresence>
+                      {/* Chat Input */}
+                      <div className="border-t border-slate-100 bg-white p-4">
+                        {!isWizardOpen && messages.length === 0 && (
+                          <motion.div 
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            className="mb-4 flex justify-center"
+                          >
+                            <button 
+                              onClick={startWizard}
+                              className="flex items-center gap-2 rounded-full bg-blue-50 px-4 py-2 text-xs font-bold text-blue-600 ring-1 ring-blue-600/20 hover:bg-blue-100 transition-all"
+                            >
+                              <ClipboardList size={14} />
+                              Use Guided Symptom Checker
+                            </button>
+                          </motion.div>
+                        )}
+                        <form onSubmit={handleSendMessage} className="relative flex items-center">
+                          <input
+                            type="text"
+                            value={inputValue}
+                            onChange={(e) => setInputValue(e.target.value)}
+                            placeholder={isMobile ? "Ask Dr. AI..." : "Describe your symptoms or ask a medical question..."}
+                            className="w-full rounded-2xl border-none bg-slate-100 py-4 pl-6 pr-14 text-sm focus:ring-2 focus:ring-blue-600 transition-all"
+                          />
+                          <button
+                            type="submit"
+                            disabled={!inputValue.trim() || isThinking || !user}
+                            className="absolute right-2 flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200 hover:bg-blue-700 disabled:opacity-50 disabled:shadow-none transition-all active:scale-95"
+                          >
+                            <Send size={18} />
+                          </button>
+                        </form>
+                        <div className="mt-3 flex items-center justify-center gap-2 text-[10px] text-slate-400 uppercase tracking-widest">
+                          <ShieldCheck size={12} />
+                          End-to-End Encrypted
+                        </div>
+                      </div>
+                    </div>
 
-                            {wizardStep > 0 && (
-                              <button 
-                                onClick={() => setWizardStep(prev => prev - 1)}
-                                className="mt-8 flex items-center gap-1 text-sm font-medium text-slate-400 hover:text-slate-600"
-                              >
-                                <ChevronLeft size={16} /> Back
-                              </button>
-                            )}
+                    {/* Desktop Sidebar */}
+                    {!isMobile && (
+                      <div className="hidden lg:flex flex-col w-72 gap-6">
+                        <div className="rounded-3xl bg-white p-6 shadow-xl ring-1 ring-slate-200">
+                          <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4 flex items-center gap-2">
+                            <Activity size={16} className="text-blue-600" />
+                            Health Insights
+                          </h3>
+                          <div className="space-y-4">
+                            <div className="p-3 rounded-xl bg-blue-50 border border-blue-100">
+                              <p className="text-xs font-bold text-blue-700 mb-1">Hydration Tip</p>
+                              <p className="text-[11px] text-blue-600 leading-relaxed">Drinking 8 glasses of water daily helps maintain cognitive function.</p>
+                            </div>
+                            <div className="p-3 rounded-xl bg-green-50 border border-green-100">
+                              <p className="text-xs font-bold text-green-700 mb-1">Sleep Quality</p>
+                              <p className="text-[11px] text-green-600 leading-relaxed">Consistent sleep schedules improve immune system response.</p>
+                            </div>
                           </div>
                         </div>
-                      </motion.div>
+
+                        <div className="rounded-3xl bg-slate-900 p-6 shadow-xl text-white">
+                          <h3 className="text-xs font-bold uppercase tracking-widest mb-4 opacity-60">System Status</h3>
+                          <div className="space-y-3">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] opacity-80">AI Model</span>
+                              <span className="text-[10px] font-bold text-green-400 uppercase">Active</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] opacity-80">Encryption</span>
+                              <span className="text-[10px] font-bold text-blue-400 uppercase">AES-256</span>
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <span className="text-[11px] opacity-80">Latency</span>
+                              <span className="text-[10px] font-bold text-slate-400">142ms</span>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
                     )}
-                  </AnimatePresence>
-
-                  {messages.map((msg) => (
-                    <motion.div
-                      key={msg.id}
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}
-                    >
-                      <div className={`flex max-w-[85%] md:max-w-[80%] gap-3 ${msg.sender === 'user' ? 'flex-row-reverse' : 'flex-row'}`}>
-                        <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white ${msg.sender === 'user' ? 'bg-blue-600' : 'bg-slate-700'}`}>
-                          {msg.sender === 'user' ? <User size={16} /> : <Stethoscope size={16} />}
-                        </div>
-                        <div className={`rounded-2xl px-4 py-3 text-sm shadow-sm ${
-                          msg.sender === 'user' 
-                            ? 'bg-blue-600 text-white rounded-tr-none' 
-                            : 'bg-white text-slate-700 border border-slate-100 rounded-tl-none'
-                        }`}>
-                          {msg.text}
-                          <p className={`mt-1 text-[10px] ${msg.sender === 'user' ? 'text-blue-100' : 'text-slate-400'}`}>
-                            {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                          </p>
-                        </div>
-                      </div>
-                    </motion.div>
-                  ))}
-                  
-                  {isThinking && (
-                    <motion.div
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="flex justify-start"
-                    >
-                      <div className="flex gap-3">
-                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-slate-700 text-white">
-                          <Stethoscope size={16} />
-                        </div>
-                        <div className="rounded-2xl bg-white border border-slate-100 px-4 py-3 shadow-sm rounded-tl-none">
-                          <div className="flex gap-1">
-                            <motion.div 
-                              animate={{ scale: [1, 1.2, 1] }} 
-                              transition={{ repeat: Infinity, duration: 1 }}
-                              className="h-2 w-2 rounded-full bg-blue-400" 
-                            />
-                            <motion.div 
-                              animate={{ scale: [1, 1.2, 1] }} 
-                              transition={{ repeat: Infinity, duration: 1, delay: 0.2 }}
-                              className="h-2 w-2 rounded-full bg-blue-400" 
-                            />
-                            <motion.div 
-                              animate={{ scale: [1, 1.2, 1] }} 
-                              transition={{ repeat: Infinity, duration: 1, delay: 0.4 }}
-                              className="h-2 w-2 rounded-full bg-blue-400" 
-                            />
-                          </div>
-                          <p className="mt-1 text-[10px] text-slate-400 italic">Dr. AI is thinking...</p>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                  <div ref={chatEndRef} />
-                </div>
-
-                {/* Chat Input */}
-                <div className="border-t border-slate-100 bg-white p-4">
-                  {!isWizardOpen && messages.length === 1 && (
-                    <motion.div 
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      className="mb-4 flex justify-center"
-                    >
-                      <button 
-                        onClick={startWizard}
-                        className="flex items-center gap-2 rounded-full bg-blue-50 px-4 py-2 text-xs font-bold text-blue-600 ring-1 ring-blue-600/20 hover:bg-blue-100 transition-all"
-                      >
-                        <ClipboardList size={14} />
-                        Use Guided Symptom Checker
-                      </button>
-                    </motion.div>
-                  )}
-                  <form onSubmit={handleSendMessage} className="relative flex items-center">
-                    <input
-                      type="text"
-                      value={inputValue}
-                      onChange={(e) => setInputValue(e.target.value)}
-                      placeholder={isMobile ? "Ask Dr. AI..." : "Describe your symptoms or ask a medical question..."}
-                      className="w-full rounded-2xl border-none bg-slate-100 py-4 pl-6 pr-14 text-sm focus:ring-2 focus:ring-blue-600 transition-all"
-                    />
-                    <button
-                      type="submit"
-                      disabled={!inputValue.trim() || isThinking}
-                      className="absolute right-2 flex h-10 w-10 items-center justify-center rounded-xl bg-blue-600 text-white shadow-lg shadow-blue-200 hover:bg-blue-700 disabled:opacity-50 disabled:shadow-none transition-all active:scale-95"
-                    >
-                      <Send size={18} />
-                    </button>
-                  </form>
-                  <div className="mt-3 flex items-center justify-center gap-2 text-[10px] text-slate-400 uppercase tracking-widest">
-                    <ShieldCheck size={12} />
-                    End-to-End Encrypted
                   </div>
-                </div>
-              </div>
-
-              {/* Desktop Sidebar */}
-              {!isMobile && (
-                <div className="hidden lg:flex flex-col w-72 gap-6">
-                  <div className="rounded-3xl bg-white p-6 shadow-xl ring-1 ring-slate-200">
-                    <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4 flex items-center gap-2">
-                      <Activity size={16} className="text-blue-600" />
-                      Health Insights
-                    </h3>
-                    <div className="space-y-4">
-                      <div className="p-3 rounded-xl bg-blue-50 border border-blue-100">
-                        <p className="text-xs font-bold text-blue-700 mb-1">Hydration Tip</p>
-                        <p className="text-[11px] text-blue-600 leading-relaxed">Drinking 8 glasses of water daily helps maintain cognitive function.</p>
-                      </div>
-                      <div className="p-3 rounded-xl bg-green-50 border border-green-100">
-                        <p className="text-xs font-bold text-green-700 mb-1">Sleep Quality</p>
-                        <p className="text-[11px] text-green-600 leading-relaxed">Consistent sleep schedules improve immune system response.</p>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="rounded-3xl bg-slate-900 p-6 shadow-xl text-white">
-                    <h3 className="text-xs font-bold uppercase tracking-widest mb-4 opacity-60">System Status</h3>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] opacity-80">AI Model</span>
-                        <span className="text-[10px] font-bold text-green-400 uppercase">Active</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] opacity-80">Encryption</span>
-                        <span className="text-[10px] font-bold text-blue-400 uppercase">AES-256</span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] opacity-80">Latency</span>
-                        <span className="text-[10px] font-bold text-slate-400">142ms</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                </motion.div>
               )}
-            </div>
+
+              {activeTab === 'history' && (
+                <motion.div
+                  key="history"
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="max-w-4xl mx-auto"
+                >
+                  <div className="mb-8 flex items-center justify-between">
+                    <div>
+                      <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Consultation History</h2>
+                      <p className="mt-2 text-sm md:text-base text-slate-600">Review your past conversations with Dr. AI.</p>
+                    </div>
+                    <button 
+                      onClick={createNewChat}
+                      className="flex items-center gap-2 rounded-full bg-blue-600 px-6 py-3 text-sm font-bold text-white shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all"
+                    >
+                      <Plus size={18} />
+                      New Chat
+                    </button>
+                  </div>
+
+                  <div className="grid gap-4">
+                    {chatSessions.length === 0 ? (
+                      <div className="bg-white rounded-3xl p-12 text-center border border-slate-100 shadow-sm">
+                        <div className="h-16 w-16 rounded-full bg-slate-50 text-slate-300 flex items-center justify-center mx-auto mb-4">
+                          <History size={32} />
+                        </div>
+                        <h3 className="text-lg font-bold text-slate-900 mb-2">No History Yet</h3>
+                        <p className="text-slate-500 mb-6">Start your first consultation to see it here.</p>
+                        <button onClick={() => setActiveTab('chat')} className="text-blue-600 font-bold hover:underline">Go to Chat</button>
+                      </div>
+                    ) : (
+                      chatSessions.map((session) => (
+                        <div 
+                          key={session.id}
+                          className={`group relative bg-white rounded-2xl p-5 border transition-all hover:shadow-md ${currentSessionId === session.id ? 'border-blue-600 ring-1 ring-blue-600' : 'border-slate-100'}`}
+                        >
+                          <div className="flex items-start justify-between">
+                            <div className="flex-1 cursor-pointer" onClick={() => { setCurrentSessionId(session.id); setActiveTab('chat'); }}>
+                              <h4 className="font-bold text-slate-900 mb-1 group-hover:text-blue-600 transition-colors">{session.title}</h4>
+                              <div className="flex items-center gap-3 text-xs text-slate-400">
+                                <span className="flex items-center gap-1">
+                                  <Clock size={12} />
+                                  {session.updatedAt?.toDate ? session.updatedAt.toDate().toLocaleDateString() : 'Just now'}
+                                </span>
+                                <span className="flex items-center gap-1">
+                                  <MessageSquare size={12} />
+                                  Session ID: {session.id.slice(0, 8)}
+                                </span>
+                              </div>
+                            </div>
+                            <button 
+                              onClick={() => deleteSession(session.id)}
+                              className="p-2 text-slate-300 hover:text-red-600 transition-colors opacity-0 group-hover:opacity-100"
+                            >
+                              <Trash2 size={18} />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </motion.div>
+              )}
+
+              {activeTab === 'billing' && (
+                <motion.div
+                  key="billing"
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="max-w-5xl mx-auto"
+                >
+                  <div className="mb-12 text-center">
+                    <h2 className="text-2xl md:text-3xl font-bold tracking-tight text-slate-900">Subscription Plans</h2>
+                    <p className="mt-2 text-sm md:text-base text-slate-600">Choose the plan that best fits your healthcare needs.</p>
+                  </div>
+
+                  <div className="grid md:grid-cols-3 gap-8">
+                    {/* Free Plan */}
+                    <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm flex flex-col">
+                      <div className="mb-8">
+                        <h3 className="text-lg font-bold text-slate-900 mb-2">Basic</h3>
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-4xl font-black text-slate-900">$0</span>
+                          <span className="text-slate-500 text-sm">/month</span>
+                        </div>
+                        <p className="mt-4 text-sm text-slate-500">Essential AI insights for everyone.</p>
+                      </div>
+                      <ul className="space-y-4 mb-8 flex-1">
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-green-500" />
+                          5 Consultations / month
+                        </li>
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-green-500" />
+                          Basic Symptom Checker
+                        </li>
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-green-500" />
+                          24h Chat History
+                        </li>
+                      </ul>
+                      <button className="w-full py-3 rounded-xl border-2 border-slate-100 font-bold text-slate-400 cursor-not-allowed">
+                        Current Plan
+                      </button>
+                    </div>
+
+                    {/* Pro Plan */}
+                    <div className="bg-white rounded-3xl p-8 border-2 border-blue-600 shadow-xl shadow-blue-100 flex flex-col relative scale-105">
+                      <div className="absolute -top-4 left-1/2 -translate-x-1/2 bg-blue-600 text-white text-[10px] font-black uppercase tracking-widest px-4 py-1 rounded-full">
+                        Recommended
+                      </div>
+                      <div className="mb-8">
+                        <h3 className="text-lg font-bold text-slate-900 mb-2">Professional</h3>
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-4xl font-black text-slate-900">$19</span>
+                          <span className="text-slate-500 text-sm">/month</span>
+                        </div>
+                        <p className="mt-4 text-sm text-slate-500">Advanced analysis and priority access.</p>
+                      </div>
+                      <ul className="space-y-4 mb-8 flex-1">
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-blue-600" />
+                          Unlimited Consultations
+                        </li>
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-blue-600" />
+                          Advanced Symptom Analysis
+                        </li>
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-blue-600" />
+                          Lifetime Chat History
+                        </li>
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-blue-600" />
+                          Priority AI Processing
+                        </li>
+                      </ul>
+                      <button className="w-full py-3 rounded-xl bg-blue-600 font-bold text-white shadow-lg shadow-blue-200 hover:bg-blue-700 transition-all flex items-center justify-center gap-2">
+                        <Star size={18} />
+                        Upgrade to Pro
+                      </button>
+                    </div>
+
+                    {/* Enterprise Plan */}
+                    <div className="bg-white rounded-3xl p-8 border border-slate-200 shadow-sm flex flex-col">
+                      <div className="mb-8">
+                        <h3 className="text-lg font-bold text-slate-900 mb-2">Enterprise</h3>
+                        <div className="flex items-baseline gap-1">
+                          <span className="text-4xl font-black text-slate-900">$49</span>
+                          <span className="text-slate-500 text-sm">/month</span>
+                        </div>
+                        <p className="mt-4 text-sm text-slate-500">For clinics and healthcare providers.</p>
+                      </div>
+                      <ul className="space-y-4 mb-8 flex-1">
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-slate-900" />
+                          Multi-user Access
+                        </li>
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-slate-900" />
+                          API Access for Integrations
+                        </li>
+                        <li className="flex items-center gap-3 text-sm text-slate-600">
+                          <CheckCircle2 size={18} className="text-slate-900" />
+                          Dedicated Support
+                        </li>
+                      </ul>
+                      <button className="w-full py-3 rounded-xl border-2 border-slate-900 font-bold text-slate-900 hover:bg-slate-900 hover:text-white transition-all">
+                        Contact Sales
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="mt-16 p-8 rounded-3xl bg-slate-100 border border-slate-200">
+                    <div className="flex flex-col md:flex-row items-center justify-between gap-6">
+                      <div className="flex items-center gap-4">
+                        <div className="h-12 w-12 rounded-full bg-white flex items-center justify-center text-blue-600 shadow-sm">
+                          <CreditCard size={24} />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-slate-900">Secure Payments</h4>
+                          <p className="text-sm text-slate-500">All transactions are encrypted and processed securely via Stripe.</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Lock size={16} className="text-slate-400" />
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-widest">PCI-DSS Compliant</span>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
           </div>
         </section>
 
