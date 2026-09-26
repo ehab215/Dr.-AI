@@ -1,0 +1,6 @@
+transformers==5.2.0
+accelerate==1.6.0
+torch
+sentencepiece
+protobuf
+huggingface_hub
